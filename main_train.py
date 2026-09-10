@@ -40,6 +40,7 @@ import torch
 from gobang.config import (DEFAULT_PARAM_FILE, PRESETS, Config,
                            load_param_file)
 from gobang.dataset import Buffer
+from gobang.mcts import clamp_batch
 from gobang.model import build_net, load_ckpt, save_ckpt
 from gobang.selfplay import (collect_ev, collect_sp, eval_games,
                              eval_parallel, make_eval_pool, make_ev_jobs,
@@ -85,6 +86,8 @@ def parse_args() -> tuple[Config, list[str]]:
     p.add_argument("--c-puct", type=float, help="PUCT 探索系数")
     p.add_argument("--mcts-batch", type=int, help="MCTS 每批网络评估的叶子数")
     p.add_argument("--eval-games", type=int, help="评估对局数")
+    p.add_argument("--eval-every", type=int,
+                   help="每隔几轮做一次晋升评估（1=每轮）")
     p.add_argument("--eval-sim", dest="sim_eval", type=int,
                    help="评估 MCTS 模拟数")
     p.add_argument("--eval-threshold", type=float, help="晋升所需得分率")
@@ -124,7 +127,8 @@ def parse_args() -> tuple[Config, list[str]]:
             if v is not None:
                 setattr(cfg, k, v)
                 break
-    notes = [f"参数文件 {cfg_path}：已加载 {len(file_cfg)} 项" if file_cfg
+    n_real = sum(1 for k in file_cfg if not k.startswith("_"))
+    notes = [f"参数文件 {cfg_path}：已加载 {n_real} 项" if file_cfg
              else f"参数文件 {cfg_path} 不存在，使用内置默认参数"]
     if preset_name != "default":
         notes.append(f"预设 {preset_name}：{len(preset)} 项参数生效")
@@ -148,16 +152,36 @@ class Tee:
         self.f.close()
 
 
-def load_meta(path: Path) -> dict:
-    if path.exists():
+def load_meta(path: Path, warn=print) -> dict:
+    if not path.exists():
+        return {"iter": 0, "history": []}
+    try:
         return json.loads(path.read_text(encoding="utf-8"))
-    return {"iter": 0, "history": []}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # run 目录常在机器间拷贝（本地<->远程卡），拷到一半就有半个 JSON。
+        # 为几行历史指标让整个 run 起不来不值当：备份后重开，权重仍在 latest.pt，
+        # 续训轮次也取自 latest.pt 里的 iter，不受影响。
+        bad = path.with_suffix(".bad")
+        shutil.copyfile(path, bad)
+        warn(f"meta.json 解析失败（{e}），已备份为 {bad.name}，历史指标从本轮起重记")
+        return {"iter": 0, "history": []}
 
 
 def save_meta(path: Path, meta: dict):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(path)
+
+
+def promote_best(latest: Path, best: Path):
+    """latest -> best：先写临时文件再原子替换。
+
+    直接 shutil.copyfile 的话，恰好在拷贝途中 Ctrl+C 会留下半个 best.pt，
+    下次 play.py 加载才炸——和 save_ckpt 用同一套写法。
+    """
+    tmp = best.with_suffix(".pt.tmp")
+    shutil.copyfile(latest, tmp)
+    tmp.replace(best)
 
 
 def main():
@@ -175,6 +199,7 @@ def main():
     elif cfg.device == "cuda" and not torch.cuda.is_available():
         log("CUDA 不可用，训练设备回退到 cpu")
         cfg.device = "cpu"
+    cfg.eval_every = max(1, cfg.eval_every)
     if cfg.use_amp and cfg.device == "cpu":
         cfg.use_amp = False
         log("训练设备为 cpu，AMP 已自动关闭")
@@ -187,7 +212,7 @@ def main():
     buffer = Buffer(run / "buffer")
     latest, best = run / "latest.pt", run / "best.pt"
     meta_path = run / "meta.json"
-    meta = load_meta(meta_path)
+    meta = load_meta(meta_path, log)
 
     start = 1
     if cfg.resume and latest.exists():
@@ -207,7 +232,7 @@ def main():
             f"{sum(p.numel() for p in net.parameters()):,}")
 
     if not best.exists():
-        shutil.copyfile(latest, best)
+        promote_best(latest, best)
         log("best.pt 不存在，已用当前模型初始化")
     meta["best_iter"] = meta.get("best_iter", start - 1)
     meta["config"] = cfg.to_dict()
@@ -244,13 +269,22 @@ def main():
         eval_txt = "评估 跳过"
     elif want_cpu_eval:
         eval_txt = (f"评估 {cfg.eval_games} 局 @{cfg.eval_threshold}"
+                    f" 每{cfg.eval_every}轮"
                     "（CPU 池自动收缩进程数，与训练重叠；建不起来则串行）")
     else:
-        eval_txt = f"评估 {cfg.eval_games} 局 @{cfg.eval_threshold}（串行）"
+        eval_txt = (f"评估 {cfg.eval_games} 局 @{cfg.eval_threshold}"
+                    f" 每{cfg.eval_every}轮（串行）")
+    eff_batch = clamp_batch(cfg.mcts_batch, cfg.sim_selfplay)
+    batch_txt = f"sim{cfg.sim_selfplay}"
+    if eff_batch != cfg.mcts_batch:
+        # 静默改写用户参数很难查，这里说明收紧到多少、以及为什么必须收紧。
+        batch_txt += (f"（每批 {eff_batch} 叶子：mcts_batch={cfg.mcts_batch} 相对 "
+                      "sim 过大已兜底收紧，否则整步搜索只有一次价值回传，"
+                      "访问分布会退化成均匀分布）")
     log(f"训练设备 {cfg.device}（AMP {'开' if cfg.use_amp else '关'}）| "
         f"自对弈 {cfg.workers} 进程 x {cfg.sp_device}（进程池跨轮复用）| "
         f"轮数 {start}..{cfg.iterations} | 每轮 {cfg.games_per_iter} 局 x "
-        f"sim{cfg.sim_selfplay} | 训练 {cfg.train_steps} 步 | {eval_txt}")
+        f"{batch_txt} | 训练 {cfg.train_steps} 步 | {eval_txt}")
     log("Ctrl+C 随时中断（当前轮的自对弈/训练会作废），之后 --resume 续训\n")
 
     def emit(base, sp, tl, lr, wr, promoted, sec):
@@ -263,7 +297,7 @@ def main():
             "draws": sp["draws"], "resigns": sp["resigns"],
             "ce": round(tl["ce"], 4), "mse": round(tl["mse"], 4),
             "samples": tl["samples"], "lr": lr,
-            "eval_wr": None if cfg.no_eval else round(wr, 3),
+            "eval_wr": None if (cfg.no_eval or wr is None) else round(wr, 3),
             "promoted": promoted, "sec": sec})
         meta["iter"] = it
         meta["history"].append(entry)
@@ -275,10 +309,11 @@ def main():
             tb.add_scalar("selfplay/avg_len", sp["avg_len"], it)
             tb.add_scalar("selfplay/black_win_rate", entry["black_win_rate"], it)
             tb.add_scalar("selfplay/samples", tl["samples"], it)
-            if not cfg.no_eval:
+            if wr is not None:
                 tb.add_scalar("eval/score_vs_best", wr, it)
-        ev_s = "auto" if cfg.no_eval else (
-            f"{wr:.2f} {'晋升' if promoted else '保持'}")
+        ev_s = ("auto" if cfg.no_eval else
+                "未评" if wr is None else
+                f"{wr:.2f} {'晋升' if promoted else '保持'}")
         h_txt = (f" 人机{tl['h_steps']}步ce{tl['h_ce']}"
                  if "h_steps" in tl else "")
         eta = sec * (cfg.iterations - it) / 60
@@ -298,7 +333,7 @@ def main():
         pbase["t_eval"] = round(time.time() - te)
         promoted = wr >= cfg.eval_threshold
         if promoted:
-            shutil.copyfile(latest, best)
+            promote_best(latest, best)
             meta["best_iter"] = pit
         emit(pbase, psp, ptl, plr, wr, promoted, psec)
 
@@ -351,9 +386,13 @@ def main():
             base = {"iter": it, "t_selfplay": round(t_sp),
                     "t_train": round(t_tr), "t_eval": 0}
             if cfg.no_eval:
-                shutil.copyfile(latest, best)
+                promote_best(latest, best)
                 meta["best_iter"] = it
                 emit(base, sp, tl, lr, 1.0, True, round(time.time() - t0))
+            elif it % cfg.eval_every:
+                # 跳过评估的轮次照常记档，只是评估列空着。评估是 CPU 密集活，
+                # 每轮都做会顶在轮次节拍后面干等；摊到每 N 轮就藏进训练里了。
+                emit(base, sp, tl, lr, None, False, round(time.time() - t0))
             else:
                 tgt = ensure_ev_pool() if want_cpu_eval else None
                 if tgt is not None and tgt is not pool:
@@ -375,7 +414,7 @@ def main():
                     base["t_eval"] = round(time.time() - te)
                     promoted = wr >= cfg.eval_threshold
                     if promoted:
-                        shutil.copyfile(latest, best)
+                        promote_best(latest, best)
                         meta["best_iter"] = it
                     emit(base, sp, tl, lr, wr, promoted,
                          round(time.time() - t0))

@@ -14,6 +14,9 @@ from pathlib import Path
 BOARD_SIZE = 9
 WIN_LEN = 5
 FEATURE_PLANES = 4
+# MCTS 每步搜索至少要做几轮「批量评估 -> 回传」。batch >= sim 时整步搜索只有一次
+# 回传，树里拿不到任何价值反馈，访问分布退化成均匀分布（详见 mcts.py 顶部注释）。
+SEARCH_BATCH_ROUNDS = 8
 
 DEFAULT_MODEL = "runs/default/best.pt"   # play.py 默认主模型
 DEFAULT_PARAM_FILE = "train.json"        # 运行时默认加载的参数文件名
@@ -62,7 +65,9 @@ class Config:
     sim_selfplay: int = 128
     sim_eval: int = 200
     sim_play: int = 400
-    mcts_batch: int = 64
+    # 「一次前向最多塞几个叶子」，不是搜索预算。真正生效的上限由 mcts.clamp_batch
+    # 收紧到 sim // SEARCH_BATCH_ROUNDS，保证每步搜索有足够多轮价值反馈。
+    mcts_batch: int = 16
     c_puct: float = 1.6
     noise_eps: float = 0.25
     noise_alpha: float = 0.12
@@ -85,6 +90,10 @@ class Config:
     human_epochs: int = 0   # >0 时额外用人机对局数据训练 N 个 epoch
 
     eval_games: int = 40
+    eval_every: int = 1     # 每隔几轮做一次晋升评估。评估跑在 CPU 上，每轮都做
+                           # 时它的延时会顶到轮次节拍上（实测 60 局 sim200 的 CPU
+                           # 评估约 310s > 一轮自对弈+训练约 190s，等于每轮白等
+                           # 100s+）。设 3 就摊薄到 1/3，日志里不评估的轮次显示"未评"。
     eval_threshold: float = 0.55
     eval_noise: float = 0.05
     no_eval: bool = False
@@ -119,7 +128,10 @@ def load_param_file(path: str | Path) -> dict:
         raise SystemExit(f"参数文件 {p} 不是合法 JSON：{e}")
     if not isinstance(data, dict):
         raise SystemExit(f"参数文件 {p} 顶层必须是 JSON 对象")
-    unknown = sorted(set(data) - param_fields())
+    # JSON 没有注释，下划线开头的键当注释放过（train_5060.json 这类文件要靠它写
+    # 用法说明）。其余未知键仍然立即报错——参数名拼错后静默失效是最难查的坑。
+    unknown = sorted(k for k in set(data) - param_fields()
+                     if not k.startswith("_"))
     if unknown:
         raise SystemExit(f"参数文件 {p} 含未知键 {unknown}；"
                          f"可用键见 gobang/config.py 的 Config 字段")

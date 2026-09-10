@@ -7,7 +7,7 @@
   "sim_selfplay": 64,
   "sim_eval": 128,
   "sim_play": 256,
-  "mcts_batch": 128,
+  "mcts_batch": 16,
   "train_steps": 1024,
   "batch_size": 512,
   "use_amp": false,

@@ -64,6 +64,12 @@ def train_steps(net, buf, cfg, steps: int, lr: float, device: str, log=print,
         opt.zero_grad(set_to_none=True)
         with torch.amp.autocast(dev.type, enabled=amp):
             logits, value = net(f)
+            # 非法点（已落子）屏蔽掉再算 softmax：推理侧 mcts._expand 是在合法
+            # 点上重归一化的，等价于先屏蔽再 softmax。训练不屏蔽的话，网络得把
+            # 概率质量挪到已占点上、目标里那些位置又恒为 0，梯度和推理语义不一致，
+            # 策略头收敛明显变慢（交叉验证 CE 下不去）。
+            occ = ((f[:, 0] + f[:, 1]) > 0.5).flatten(1)
+            logits = logits.masked_fill(occ, -1e4)
             logp = torch.log_softmax(logits, dim=1)
             ce = -(p * logp).sum(1).mean()
             mse = ((value - z) ** 2).mean()

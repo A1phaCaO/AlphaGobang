@@ -143,6 +143,58 @@ def mcts_direction():
     print("puct direction ok")
 
 
+def _tree_depth(node):
+    # 树深。退化搜索的典型特征就是所有叶子都挂在根下面（深度只有 1）。
+    if not node.children:
+        return 0
+    return 1 + max(_tree_depth(ch) for ch in node.children.values())
+
+
+def mcts_batch_guard():
+    """batch >= sim 的兜底：搜索必须拆成多轮，且同一叶子不得重复入队。
+
+    回归用例：mcts_batch=128 + sim_selfplay=128 时整步搜索只有一次回传，树里
+    没有价值反馈，访问分布退化成「每个可走点各 1 次访问」的均匀分布，自对弈
+    数据等于随机落子，训练 CE 只能收敛到 ln(合法点数)≈3.5~4.0 的熵地板。
+    """
+    import gobang.mcts as M
+    from gobang.mcts import clamp_batch, mcts_search
+
+    assert clamp_batch(128, 128) == 16
+    assert clamp_batch(8, 128) == 8
+    for sim in (24, 64, 128):
+        calls = []
+        seen = []
+
+        def evaluator(games, calls=calls):
+            probs = np.full((len(games), S * S), 1.0 / (S * S), np.float32)
+            vals = np.array([1.0 if g.last == 40 else -1.0 for g in games],
+                            np.float32)
+            calls.append(len(games))
+            return probs, vals
+
+        orig_select = M._select
+
+        def select(root, c_puct, orig=orig_select, seen=seen):
+            out = orig(root, c_puct)
+            if isinstance(out, tuple):
+                seen.append(id(out[0]))
+            return out
+
+        M._select = select
+        try:
+            root = mcts_search(Gomoku(S), evaluator, sim=sim, batch=sim)
+        finally:
+            M._select = orig_select
+        vis = {m: ch.N for m, ch in root.children.items()}
+        assert len(calls) > 2, f"sim={sim} 只做了 {len(calls)} 批评估，搜索退化成单层"
+        assert len(seen) == len(set(seen)), f"sim={sim} 同一叶子被重复入队"
+        assert sum(vis.values()) == sim - 1, (sim, sum(vis.values()))
+        assert max(vis.values()) > 1, f"sim={sim} 访问数全为 1，等于没有搜索"
+        assert _tree_depth(root) > 1, f"sim={sim} 树只有根一层，没往下搜"
+    print("mcts batch guard ok")
+
+
 def mcts_checks():
     torch.manual_seed(0)
     net = GomokuNet(S, 32, 2)
@@ -228,10 +280,12 @@ def cli_checks():
     try:
         with tempfile.TemporaryDirectory() as td:
             fp = Path(td) / "p.json"
-            fp.write_text('{"games_per_iter": 100, "c_puct": 1.2, "use_amp": true}',
+            # 下划线开头的键当注释放行（JSON 没注释），其余未知键仍要报错
+            fp.write_text('{"games_per_iter": 100, "c_puct": 1.2, "use_amp": true,'
+                          ' "_comment": "跑法说明", "_note": "另一行注释"}',
                           encoding="utf-8")
             sys.argv = ["main_train.py", "--config", str(fp),
-                        "--preset", "smoke", "--games", "9"]
+                        "--preset", "smoke", "--games", "9", "--eval-every", "3"]
             from main_train import parse_args
             cfg, notes = parse_args()
             assert cfg.games_per_iter == 9, "命令行单项应最优先"
@@ -239,6 +293,7 @@ def cli_checks():
                 "预设应覆盖参数文件与默认"
             assert cfg.c_puct == 1.2 and cfg.use_amp is True, "参数文件应覆盖内置默认"
             assert cfg.iterations == 2 and cfg.train_steps == 50
+            assert cfg.eval_every == 3, "--eval-every 应落到 Config.eval_every"
             assert any("smoke" in n for n in notes)
             sys.argv = ["main_train.py", "--config", str(fp), "--games", "9"]
             cfg, _ = parse_args()  # 不传 --preset 也不应崩
@@ -292,6 +347,7 @@ def main():
     model_checks()
     mcts_checks()
     mcts_direction()
+    mcts_batch_guard()
     ui_checks()
     cli_checks()
     amp_checks()

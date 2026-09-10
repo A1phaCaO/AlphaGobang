@@ -1,0 +1,43 @@
+{
+  "_comment": "远程 5060 专用：uv run python main_train.py --config train_5060.json；中断后加 --resume",
+
+  "size": 9,
+  "channels": 96,
+  "blocks": 10,
+
+  "iterations": 150,
+  "games_per_iter": 400,
+  "sim_selfplay": 128,
+  "mcts_batch": 16,
+  "c_puct": 2.0,
+  "noise_eps": 0.25,
+  "noise_alpha": 0.12,
+  "tau_moves": 10,
+  "resign_value": -0.9,
+  "resign_moves": 30,
+
+  "train_steps": 1200,
+  "batch_size": 512,
+  "use_amp": true,
+  "lr_init": 0.001,
+  "lr_decay": 0.5,
+  "lr_decay_every": 40,
+  "weight_decay": 0.0001,
+  "buffer_window": 10,
+  "human_epochs": 0,
+
+  "eval_games": 40,
+  "eval_every": 3,
+  "eval_threshold": 0.55,
+  "eval_noise": 0.05,
+  "sim_eval": 96,
+  "eval_device": "cpu",
+  "eval_workers": 0,
+
+  "sim_play": 256,
+  "workers": 8,
+  "device": "auto",
+  "sp_device": "auto",
+  "run_dir": "runs/5060",
+  "seed": 0
+}
