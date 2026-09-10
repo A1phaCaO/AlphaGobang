@@ -40,6 +40,9 @@ def parse_args():
                    help="主模型 MCTS 模拟数，默认取参数文件的 sim_play")
     p.add_argument("--sim-b", type=int, default=None, help="对手 MCTS 模拟数，默认同 --sim")
     p.add_argument("--games", type=int, default=1, help="机器对战局数，>1 进入统计模式")
+    p.add_argument("--self", dest="selfplay", action="store_true",
+                   help="人人对弈录制：双方都由人输入，局末存入冷启动数据"
+                        "（不加载任何模型）；配合 --cli 用控制台版")
     p.add_argument("--view", action="store_true", help="控制台逐手展示（配合 --cli）")
     p.add_argument("--cli", action="store_true", help="使用控制台字符界面而非图形窗口")
     p.add_argument("--delay", type=float, default=0.0, help="逐手展示时每步停顿秒数")
@@ -149,6 +152,75 @@ def human_match(args, cfg, agent: Agent, size: int, buffer_dir: str | None = Non
         print(f"{result[2]} 手后{side}棋胜，{who}")
 
 
+def self_match(args, size: int, buffer_dir: str | None = None):
+    """人人对弈（控制台）：双方依次输入着法，局末整局存入冷启动数据。"""
+    from gobang.dataset import Buffer, GameRecorder
+    game = Gomoku(size)
+    stack = [game]
+    rec = GameRecorder()
+    buffer = Buffer(buffer_dir) if buffer_dir else None
+    print(ui.LEGEND)
+    print(ui.HELP)
+    print()
+    print(ui.render(game))
+    result = None
+
+    def save(winner):
+        if buffer is None:
+            return
+        arr = rec.finish(winner)
+        if arr is not None:
+            buffer.append_human(*arr)
+            print(f"本局 {arr[0].shape[0]} 手已存入冷启动数据 {buffer.root}/human")
+
+    while result is None:
+        side = "黑" if game.turn == 0 else "白"
+        while True:
+            try:
+                line = input(f"\n{side}方走棋: ").strip()
+            except EOFError:
+                print("退出")
+                return
+            c = line.lower()
+            if c in ("q", "quit", "exit"):
+                print("退出")
+                return
+            if c == "undo":
+                if len(stack) > 1:
+                    del stack[-1:]
+                    game = stack[-1]
+                    rec.reset()
+                    print("（悔棋后本局不再作为教学样本）")
+                    print(ui.render(game))
+                else:
+                    print("没有可悔的棋")
+                break
+            if c == "resign":
+                result = ("resign", 1 - game.turn)
+                save(1 - game.turn)
+                break
+            pos = ui.parse_cell(c, size)
+            if pos is None:
+                print("格式不对，参考 E5 / 5e / 5,5")
+                continue
+            if not game.is_legal(pos):
+                print("该点已有子或不合法")
+                continue
+            rec.add(game, pos)
+            game = game.placed(pos)
+            stack.append(game)
+            print()
+            print(ui.render(game))
+            break
+        if result is None and game.is_terminal():
+            result = ("over", game.winner)
+            save(game.winner)
+    if result[1] == 2:
+        print("棋盘走满，和棋")
+    else:
+        print(f"{'黑' if result[1] == 0 else '白'}棋胜")
+
+
 def view_match(args, cfg, pa, pb, size: int):
     game = Gomoku(size)
     rng = np.random.default_rng(args.seed)
@@ -180,6 +252,14 @@ def main():
         setattr(cfg, k, v)
     if args.sim is None:
         args.sim = cfg.sim_play
+    if args.selfplay:
+        buffer_dir = str(Path(args.model).parent / "buffer")
+        if args.cli:
+            self_match(args, cfg.size, buffer_dir)
+        else:
+            from gobang import gui
+            gui.run(cfg, "cpu", args.model, mode="hh", buffer_dir=buffer_dir)
+        return
     if not Path(args.model).exists():
         print(f"找不到模型 {args.model}，请先运行: python main_train.py")
         sys.exit(1)

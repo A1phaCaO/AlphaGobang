@@ -11,3 +11,7 @@ wheels/
 
 # 训练产物
 runs/
+
+# Codex 会话缓存
+.omo/
+.codegraph/

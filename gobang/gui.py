@@ -21,8 +21,8 @@ LINE_COLOR = "#4a2f14"
 LABELS = "ABCDEFGHIJKLMN"
 SIM_MIN, SIM_MAX = 32, 30000
 
-MODES = [("人机对战", "pvp"), ("观战 vs 随机", "view_random"),
-         ("观战 vs 模型", "view_model")]
+MODES = [("人机对战", "pvp"), ("人人对弈录制", "hh"),
+         ("观战 vs 随机", "view_random"), ("观战 vs 模型", "view_model")]
 
 
 def _stars(size: int) -> list[tuple[int, int]]:
@@ -188,16 +188,20 @@ class App(tk.Tk):
 
     def _apply_mode(self):
         m = self.mode_var.get()
-        self.view = m != "pvp"
+        self.hh = m == "hh"
+        self.view = m in ("view_random", "view_model")
         self.human = 1 if self.color_var.get() == "白" else 0
         for b in self.view_only:
             b.grid() if self.view else b.grid_remove()
         for b in self.pvp_only:
             b.grid() if not self.view else b.grid_remove()
+        self.b_hint.grid() if m == "pvp" else self.b_hint.grid_remove()
         self.delay_row.grid() if self.view else self.delay_row.grid_remove()
         if self.buffer is not None:
-            self.rec_chk.grid() if not self.view else self.rec_chk.grid_remove()
-        self.color_cb.config(state="readonly" if not self.view else "disabled")
+            show_rec = m in ("pvp", "hh")
+            self.rec_chk.grid() if show_rec else self.rec_chk.grid_remove()
+        cb_state = "readonly" if m == "pvp" else "disabled"
+        self.color_cb.config(state=cb_state)
         if self.view:
             self.auto = False
             self.play_text.set("▶ 自动")
@@ -229,6 +233,10 @@ class App(tk.Tk):
     def _reload_players(self):
         from .agent import RandomPlayer
         self.agent = None
+        if self.hh:   # 人人录制不需要任何模型
+            self.opp = None
+            self.title(f"人人对弈录制  {self.size}x{self.size}")
+            return
         try:
             net, _ = load_ckpt(self.model_path, self.device)
             if net.size != self.size:
@@ -334,7 +342,7 @@ class App(tk.Tk):
                 text = "和棋（棋盘走满）"
             else:
                 side = "黑" if g.winner == 0 else "白"
-                if self.view:
+                if self.view or self.hh:
                     text = f"{g.n_moves} 手后{side}棋胜"
                 else:
                     text = "你赢了！" if g.winner == self.human else "AI 获胜"
@@ -344,7 +352,7 @@ class App(tk.Tk):
             if self.view:
                 self.auto = False
                 self.play_text.set("▶ 自动")
-        elif self.view:
+        elif self.view or self.hh:
             self._set_status(f"第 {g.n_moves + 1} 手"
                              f"（{'黑' if g.turn == 0 else '白'}方行棋）")
         elif g.turn == self.human:
@@ -375,16 +383,19 @@ class App(tk.Tk):
         if self.view or self.busy:
             return
         pos = self._pick(event)
-        self._draw_hover(pos if self.game.turn == self.human else None)
+        ok = self.hh or self.game.turn == self.human
+        self._draw_hover(pos if ok else None)
 
     def _on_click(self, event):
         if self.view or self.busy or self.game.is_terminal():
             return
         pos = self._pick(event)
-        if pos is None or self.game.turn != self.human or not self.game.is_legal(pos):
+        if pos is None or not self.game.is_legal(pos):
+            return
+        if not self.hh and self.game.turn != self.human:
             return
         self._move(pos)
-        if not self.game.is_terminal():
+        if not self.game.is_terminal() and not self.hh:
             self._predict_async()
             self._ai_step()
 
@@ -410,7 +421,7 @@ class App(tk.Tk):
 
     # ---------- 对局调度 ----------
     def new_game(self):
-        if self.agent is None:
+        if self.agent is None and not self.hh:
             return
         self.seq += 1
         self.game = Gomoku(self.size)
@@ -428,7 +439,7 @@ class App(tk.Tk):
         if self.view:
             self.auto = False
             self.play_text.set("▶ 自动")
-        elif self.game.turn != self.human:
+        elif not self.hh and self.game.turn != self.human:
             self._ai_step()
 
     def _bg(self, fn, on_done):
@@ -520,7 +531,8 @@ class App(tk.Tk):
 
     def _predict_async(self):
         """人类刚走完一手：用当前 AI 快速推演一次给出胜率（不阻塞输入）。"""
-        if self.view or self.agent is None or self.game.is_terminal():
+        if (self.view or self.hh or self.agent is None
+                or self.game.is_terminal()):
             return
         g = self.game
         agent = self.agent
@@ -575,8 +587,9 @@ class App(tk.Tk):
         if self.busy or self.view or len(self.stack) < 2:
             return
         i = len(self.stack) - 2
-        while i >= 0 and self.stack[i].turn != self.human:
-            i -= 1
+        if not self.hh:  # 人机：退回到上一个「轮到你」的局面（连 AI 那手一起撤）
+            while i >= 0 and self.stack[i].turn != self.human:
+                i -= 1
         if i < 0:
             return
         self.seq += 1
