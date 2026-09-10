@@ -9,9 +9,10 @@ from .game import Gomoku
 
 
 def train_steps(net, buf, cfg, steps: int, lr: float, device: str, log=print,
-                seed_mix: int = 0):
+                seed_mix: int = 0, progress: bool = False):
     """训练循环。GPU 可用时把整个数据窗口常驻显存、增强与采样全在 GPU 上做，
     消除每步 numpy/拷贝开销；显存不足自动回退 CPU 流水线。
+    progress=True 时给步循环套一个 tqdm 进度条（默认关，main_train 不受影响）。
     cfg.use_amp 且设备为 GPU 时启用 FP16 混合精度（autocast + GradScaler），
     损失计算保持在 FP32，数值行为与纯 FP32 基本一致。
     seed_mix：跨调用打散采样/增强序列（同一参数文件连训多轮时避免每轮
@@ -60,7 +61,11 @@ def train_steps(net, buf, cfg, steps: int, lr: float, device: str, log=print,
                        torch.from_numpy(zs[idx]).to(dev))
 
     tot = torch.zeros(2, device=dev)
-    for f, p, z in batches():
+    it = batches()
+    if progress:
+        from tqdm import tqdm
+        it = tqdm(it, total=steps, desc="训练", unit="步")
+    for f, p, z in it:
         opt.zero_grad(set_to_none=True)
         with torch.amp.autocast(dev.type, enabled=amp):
             logits, value = net(f)

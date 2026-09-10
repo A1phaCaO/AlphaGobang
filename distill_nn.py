@@ -84,7 +84,8 @@ def main():
     print(f"先验样本 {n}（{dsize}x{dsize}）| 蒸馏 {steps} 步 (lr={lr}, "
           f"batch={cfg.batch_size}) -> {out}")
 
-    r = train_steps(net, buf, cfg, steps, lr, dev, log=None, seed_mix=7)
+    r = train_steps(net, buf, cfg, steps, lr, dev, log=None, seed_mix=7,
+                    progress=True)
     print(f"蒸馏完成：ce {r['ce']:.3f}  mse {r['mse']:.3f}")
 
     save_ckpt(out, net, {"iter": 0, "init": "nn-distill",
