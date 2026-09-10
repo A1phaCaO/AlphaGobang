@@ -1,0 +1,43 @@
+{
+  "_comment": "13x13 从头训练。冷启动加速（强烈建议，直接缩短局长=省自对弈时间）：先 rm -rf runs/13_scratch；再 uv run python -m gobang.teacher --size 13 --games 800 --out runs/13_scratch/buffer ；然后 uv run python main_train.py --config train_13_scratch.json （不要加 --resume/--warmfrom）。",
+
+  "size": 13,
+  "channels": 64,
+  "blocks": 10,
+
+  "iterations": 150,
+  "games_per_iter": 400,
+  "sim_selfplay": 128,
+  "mcts_batch": 16,
+  "c_puct": 2.0,
+  "noise_eps": 0.25,
+  "noise_alpha": 0.12,
+  "tau_moves": 8,
+  "resign_value": -0.9,
+  "resign_moves": 24,
+
+  "train_steps": 1200,
+  "batch_size": 512,
+  "use_amp": true,
+  "lr_init": 0.001,
+  "lr_decay": 0.5,
+  "lr_decay_every": 40,
+  "weight_decay": 0.0001,
+  "buffer_window": 15,
+  "human_epochs": 8,
+
+  "eval_games": 32,
+  "eval_every": 4,
+  "eval_threshold": 0.55,
+  "eval_noise": 0.05,
+  "sim_eval": 80,
+  "eval_device": "cuda",
+  "eval_workers": 0,
+
+  "sim_play": 256,
+  "workers": 8,
+  "device": "auto",
+  "sp_device": "auto",
+  "run_dir": "runs/13_scratch",
+  "seed": 0
+}
