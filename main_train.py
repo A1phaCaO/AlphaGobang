@@ -13,6 +13,8 @@
 用法示例：
     uv run python main_train.py                      # 标准参数（改 train.json 即可）
     uv run python main_train.py --resume             # 中断后继续
+    uv run python main_train.py --config train_13.json --warmfrom runs/5060/best.pt
+                                                     # 用小棋盘权重热启动大棋盘（一条命令）
     uv run python main_train.py --config runs/a.json # 换一份参数文件
     uv run python main_train.py --preset smoke       # 1~2 分钟冒烟
     uv run python main_train.py --preset strong --games 1000   # 预设上再覆盖单项
@@ -41,7 +43,7 @@ from gobang.config import (DEFAULT_PARAM_FILE, PRESETS, Config,
                            load_param_file)
 from gobang.dataset import Buffer
 from gobang.mcts import clamp_batch
-from gobang.model import build_net, load_ckpt, save_ckpt
+from gobang.model import build_net, build_warm_net, load_ckpt, save_ckpt
 from gobang.selfplay import (collect_ev, collect_sp, eval_games,
                              eval_parallel, make_eval_pool, make_ev_jobs,
                              make_pool, make_sp_jobs, play_one_game,
@@ -62,7 +64,7 @@ class ParamFormatter(argparse.ArgumentDefaultsHelpFormatter):
         super().add_argument(action)
 
 
-def parse_args() -> tuple[Config, list[str]]:
+def parse_args() -> tuple[Config, list[str], str | None]:
     p = argparse.ArgumentParser(
         description="五子棋自对弈强化学习训练",
         formatter_class=ParamFormatter)
@@ -72,6 +74,10 @@ def parse_args() -> tuple[Config, list[str]]:
                    help=f"内置参数组（{', '.join(sorted(PRESETS))}），"
                         "优先于参数文件、低于命令行单项")
     p.add_argument("--resume", action="store_true", help="从 latest.pt 断点续训")
+    p.add_argument("--warmfrom", default=None,
+                   help="用小棋盘已训权重热启动本 run：全卷积主干按形状整块搬运、"
+                        "尺寸锁死的策略/价值 Linear 头重学。仅在本 run 尚无 latest.pt "
+                        "时生效；需目标 channels/blocks 与源权重同构。")
     p.add_argument("--size", type=int, help="棋盘边长")
     p.add_argument("--channels", type=int, help="CNN 通道数")
     p.add_argument("--blocks", type=int, help="残差块数")
@@ -112,6 +118,7 @@ def parse_args() -> tuple[Config, list[str]]:
 
     cfg = Config()
     cfg_path = args.pop("config")
+    warmfrom = args.pop("warmfrom")        # 非 Config 字段，须在 stray 校验前弹出
     preset_name = args.pop("preset") or "default"
     if preset_name not in PRESETS:
         raise SystemExit(f"内部错误：PRESETS 缺少预设 '{preset_name}'")
@@ -132,7 +139,7 @@ def parse_args() -> tuple[Config, list[str]]:
              else f"参数文件 {cfg_path} 不存在，使用内置默认参数"]
     if preset_name != "default":
         notes.append(f"预设 {preset_name}：{len(preset)} 项参数生效")
-    return cfg, notes
+    return cfg, notes, warmfrom
 
 
 class Tee:
@@ -185,7 +192,7 @@ def promote_best(latest: Path, best: Path):
 
 
 def main():
-    cfg, notes = parse_args()
+    cfg, notes, warm = parse_args()
     torch.manual_seed(cfg.seed)
     run = Path(cfg.run_dir)
     run.mkdir(parents=True, exist_ok=True)
@@ -215,7 +222,20 @@ def main():
     meta = load_meta(meta_path, log)
 
     start = 1
-    if cfg.resume and latest.exists():
+    if warm and not latest.exists():
+        # 大棋盘热启动：全卷积主干从 teacher 按形状搬来，尺寸锁死的 Linear 头重学
+        teacher, _tm = load_ckpt(warm, cfg.device)
+        net, copied, reinit = build_warm_net(cfg.size, cfg.channels, cfg.blocks,
+                                             teacher)
+        save_ckpt(latest, net, {"iter": 0, "init_from": warm})
+        log(f"热启动：{warm}（size={teacher.size}）→ size={cfg.size}，"
+            f"搬运 {len(copied)} 个张量、重学 {len(reinit)} 个头张量"
+            f"（{', '.join(reinit)}）")
+    elif warm and latest.exists():
+        raise SystemExit(
+            f"--warmfrom 但 {latest} 已存在：加 --resume 续训，或先删该权重再热启动，"
+            f"以免覆盖已有训练进度")
+    elif cfg.resume and latest.exists():
         net, m = load_ckpt(latest, cfg.device)
         cfg.size = net.size
         cfg.channels = net.arch["channels"]

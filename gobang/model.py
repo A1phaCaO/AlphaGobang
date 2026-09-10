@@ -88,3 +88,31 @@ def load_ckpt(path: str | Path, device: str = "cpu") -> tuple[GomokuNet, dict]:
     net.to(device)
     net.eval()
     return net, obj
+
+
+def build_warm_net(size: int, channels: int, blocks: int,
+                   teacher: GomokuNet) -> tuple[GomokuNet, list, list]:
+    """把小棋盘已训权重迁移成大棋盘的热启动网络，返回 (student, 搬运keys, 重学keys)。
+
+    主干是全卷积 + BatchNorm，权重形状不含 H/W，换分辨率能整块搬；只有吃 Flatten
+    的两个 Linear（policy_head.4 / value_head.4）被 size² 锁死拷不动，重新随机
+    初始化。故继承的是棋形特征（trunk），决策头需靠后续自对弈重学。
+    必须同构（channels/blocks 与 teacher 一致）才能搬 conv，否则形状对不上。"""
+    ta = teacher.arch
+    if (channels, blocks) != (ta["channels"], ta["blocks"]):
+        raise SystemExit(
+            f"热启动要求与 teacher 同构：teacher 是 {ta['channels']}ch×{ta['blocks']}bl，"
+            f"目标 {channels}ch×{blocks}bl 的 conv 形状搬不过去。"
+            f"想加宽/加深请另走通道扩展方案，或从头训。")
+    student = GomokuNet(size, channels, blocks)
+    t_sd, s_sd = teacher.state_dict(), student.state_dict()
+    copied, reinit = [], []
+    for k, v in s_sd.items():
+        t = t_sd.get(k)
+        if t is not None and t.shape == v.shape:
+            v.copy_(t)
+            copied.append(k)
+        else:
+            reinit.append(k)
+    student.load_state_dict(s_sd)
+    return student, copied, reinit
