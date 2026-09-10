@@ -1,0 +1,31 @@
+[project]
+name = "gobang"
+version = "0.1.0"
+description = "五子棋强化学习：AlphaGo Zero 式自对弈 + 轻量 CNN + MCTS"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "accelerate>=1.14.0",
+    "bitsandbytes==0.50.0",
+    "ddddocr>=1.6.1",
+    "diffusers>=0.37.1",
+    "ipython>=9.13.0",
+    "matplotlib>=3.10.9",
+    "opencv-python>=5.0.0.93",
+    "pyautogui>=0.9.54",
+    "rich>=15.0.0",
+    "safetensors>=0.7.0",
+    "tensorboard>=2.21.0",
+    "tokenizers>=0.23.1",
+    "torch==2.13.0+cu132",
+    "torchvision>=0.28.0",
+    "tqdm>=4.66.5",
+    "triton-windows>=3.7.1.post27",
+]
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+
+[[tool.uv.index]]
+url = "https://mirrors.nju.edu.cn/pytorch/whl/cu132"
